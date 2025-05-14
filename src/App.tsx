@@ -25,6 +25,7 @@ function App() {
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [parsedContent, setParsedContent] = useState<ParsedContent | null>(null)
+  const [notionStatus, setNotionStatus] = useState<string | null>(null)
 
   const testConnection = async () => {
     try {
@@ -86,6 +87,31 @@ function App() {
       setError(err instanceof Error ? err.message : 'An error occurred')
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const handleSendToNotion = async () => {
+    if (!parsedContent) return;
+    setNotionStatus(null);
+    setIsLoading(true);
+    try {
+      const response = await fetch('http://localhost:3000/api/notion/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: file?.name || 'PDF to Notion Page',
+          content: parsedContent.text.slice(0, 2000) // Notion block text limit
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to create Notion page');
+      }
+      setNotionStatus('Page created in Notion!');
+    } catch (err) {
+      setNotionStatus(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -155,6 +181,19 @@ function App() {
                             ))}
                           </div>
                         </div>
+                        <button
+                          onClick={handleSendToNotion}
+                          className="mt-6 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
+                          disabled={isLoading}
+                        >
+                          {isLoading ? 'Sending to Notion...' : 'Send to Notion'}
+                        </button>
+                        {notionStatus && (
+                          <div className="mt-4 p-2 rounded text-center"
+                            style={{ background: notionStatus.includes('Page created') ? '#d1fae5' : '#fee2e2', color: notionStatus.includes('Page created') ? '#065f46' : '#991b1b' }}>
+                            {notionStatus}
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
