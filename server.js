@@ -4,10 +4,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import { PDFExtract } from 'pdf.js-extract';
 import { Client as NotionClient } from '@notionhq/client';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -256,11 +258,22 @@ ${text}
     
     let blocks;
     try {
-      // Remove Markdown code block markers if present
-      const cleaned = responseContent.replace(/```json|```/g, '').trim();
+      // Remove Markdown code block markers (handles newlines)
+      const cleaned = responseContent.replace(/```[a-zA-Z]*\r?\n|```/g, '').trim();
+      console.log('About to write cleaned Gemini response to file...');
+      fsSync.writeFileSync('gemini_response.json', cleaned);
+      console.log('Full cleaned Gemini response written to gemini_response.json');
       const parsed = JSON.parse(cleaned);
-      blocks = Array.isArray(parsed) ? parsed : (parsed.blocks || []);
+      const geminiBlocks = Array.isArray(parsed) ? parsed : (parsed.blocks || []);
+      blocks = simplifyGeminiBlocks(geminiBlocks);
     } catch (error) {
+      // Also write the cleaned response to file if parsing fails
+      try {
+        fsSync.writeFileSync('gemini_response.json', responseContent);
+        console.log('Wrote raw Gemini response to gemini_response.json after parse failure.');
+      } catch (e) {
+        console.error('Failed to write Gemini response to file:', e);
+      }
       console.error('Failed to parse Gemini response as JSON:', error);
       return res.status(500).json({ error: 'Failed to parse AI response', raw: responseContent });
     }
@@ -272,6 +285,32 @@ ${text}
     res.status(500).json({ error: 'Failed to structure blocks', details: error.message });
   }
 });
+
+// Helper to simplify Gemini Notion-style blocks to { type, text }
+function simplifyGeminiBlocks(blocks) {
+  return blocks.map(block => {
+    if (block.type === 'paragraph' && block.paragraph && block.paragraph.rich_text) {
+      return {
+        type: 'paragraph',
+        text: block.paragraph.rich_text.map(rt => rt.text?.content || '').join(' ')
+      };
+    }
+    if (block.type === 'heading_1' && block.heading_1 && block.heading_1.rich_text) {
+      return {
+        type: 'heading_2', // Map to your supported type
+        text: block.heading_1.rich_text.map(rt => rt.text?.content || '').join(' ')
+      };
+    }
+    if (block.type === 'bulleted_list_item' && block.bulleted_list_item && block.bulleted_list_item.rich_text) {
+      return {
+        type: 'bulleted_list_item',
+        text: block.bulleted_list_item.rich_text.map(rt => rt.text?.content || '').join(' ')
+      };
+    }
+    // Add more mappings as needed
+    return null;
+  }).filter(Boolean);
+}
 
 // Error handling middleware
 app.use((err, req, res, next) => {
