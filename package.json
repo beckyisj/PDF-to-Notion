@@ -10,12 +10,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@google/genai": "^0.14.0",
     "@notionhq/client": "^3.0.1",
     "autoprefixer": "^10.4.21",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "multer": "^1.4.5-lts.2",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.98.0",
     "pdf.js-extract": "^0.2.1",
     "postcss": "^8.5.3",
     "react": "^19.1.0",

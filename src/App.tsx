@@ -5,8 +5,12 @@ interface ParsedContent {
   metadata: {
     pageCount: number;
     info: any;
+    title?: string;
   };
-  pages: string[];
+  blocks?: Array<{
+    type: 'heading_2' | 'paragraph' | 'bulleted_list_item';
+    text: string;
+  }>;
 }
 
 interface UploadResponse {
@@ -19,6 +23,16 @@ interface UploadResponse {
   error?: string;
 }
 
+// Helper to clean text and format preview
+function cleanText(text: string) {
+  return text
+    .replace(/[\uE000-\uF8FF]/g, '') // Remove private use area symbols
+    .replace(/[•●◦‣▪–—]/g, '•')     // Normalize various bullet symbols
+    .replace(/[\u25A0-\u25FF]/g, '•')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
 function App() {
   const [file, setFile] = useState<File | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -26,6 +40,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [parsedContent, setParsedContent] = useState<ParsedContent | null>(null)
   const [notionStatus, setNotionStatus] = useState<string | null>(null)
+  const [aiRaw, setAiRaw] = useState<string | null>(null)
 
   const testConnection = async () => {
     try {
@@ -76,8 +91,23 @@ function App() {
         throw new Error(data.error || `Server error: ${response.status}`)
       }
 
-      setMessage('File uploaded and parsed successfully!')
-      setParsedContent(data.parsedContent)
+      if (!data.parsedContent.text) {
+        setError('No text extracted from PDF to send to AI.');
+        setIsLoading(false);
+        return;
+      }
+      console.log('Parsed text:', data.parsedContent.text);
+      const aiResponse = await fetch('http://localhost:3000/api/ai/structure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: data.parsedContent.text })
+      })
+      const aiData = await aiResponse.json()
+      if (!aiResponse.ok) {
+        throw new Error(aiData.error || 'AI structuring failed')
+      }
+      setParsedContent({ ...data.parsedContent, blocks: aiData.blocks })
+      setAiRaw(aiData.raw || JSON.stringify(aiData.blocks, null, 2))
       setFile(null)
       // Reset the file input
       const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
@@ -91,7 +121,11 @@ function App() {
   }
 
   const handleSendToNotion = async () => {
-    if (!parsedContent) return;
+    if (!parsedContent || !Array.isArray(parsedContent.blocks)) {
+      setNotionStatus('No parsed blocks to send to Notion.');
+      setIsLoading(false);
+      return;
+    }
     setNotionStatus(null);
     setIsLoading(true);
     try {
@@ -99,8 +133,8 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title: file?.name || 'PDF to Notion Page',
-          content: parsedContent.text.slice(0, 2000) // Notion block text limit
+          title: parsedContent.metadata.title || file?.name || 'PDF to Notion Page',
+          blocks: parsedContent.blocks.slice(0, 100) // Notion API limit: 100 blocks per request
         })
       });
       const data = await response.json();
@@ -172,11 +206,25 @@ function App() {
                         <p className="mb-2"><strong>Pages:</strong> {parsedContent.metadata.pageCount}</p>
                         <div className="mt-4">
                           <h3 className="font-medium mb-2">Content Preview:</h3>
+                          {aiRaw && (
+                            <div className="mb-4">
+                              <div className="text-xs text-gray-500 mb-1">Raw Gemini Response:</div>
+                              <pre className="max-h-40 overflow-y-auto bg-gray-200 p-2 rounded text-xs whitespace-pre-wrap break-words">{aiRaw}</pre>
+                            </div>
+                          )}
                           <div className="max-h-60 overflow-y-auto bg-white p-4 rounded border">
-                            {parsedContent.pages.map((page, index) => (
+                            {parsedContent.blocks?.map((block, index) => (
                               <div key={index} className="mb-4">
-                                <h4 className="font-medium">Page {index + 1}</h4>
-                                <p className="text-sm">{page}</p>
+                                {block.type === 'heading_2' ? (
+                                  <h4 className="font-bold text-lg mb-2">{cleanText(block.text)}</h4>
+                                ) : block.type === 'bulleted_list_item' ? (
+                                  <div className="flex items-start pl-6">
+                                    <span className="mr-2 text-lg">•</span>
+                                    <span className="text-sm">{cleanText(block.text)}</span>
+                                  </div>
+                                ) : (
+                                  <p className="text-sm">{cleanText(block.text)}</p>
+                                )}
                               </div>
                             ))}
                           </div>

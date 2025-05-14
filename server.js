@@ -7,6 +7,7 @@ import fs from 'fs/promises';
 import { PDFExtract } from 'pdf.js-extract';
 import { Client as NotionClient } from '@notionhq/client';
 import dotenv from 'dotenv';
+import { GoogleGenAI } from '@google/genai';
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,6 +18,9 @@ const port = process.env.PORT || 3000;
 const pdfExtract = new PDFExtract();
 const notion = new NotionClient({ auth: process.env.NOTION_API_KEY });
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
+
+// Initialize Gemini
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Enable CORS with more permissive settings for development
 app.use(cors({
@@ -32,6 +36,9 @@ app.use((req, res, next) => {
   console.log('Headers:', req.headers);
   next();
 });
+
+// Add this near the top of the file after other middleware
+app.use(express.json());
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -54,6 +61,19 @@ const upload = multer({ storage });
 // Serve static files from the 'public' directory
 app.use(express.static('public'));
 
+// Helper to clean text and detect bullets
+function cleanText(text) {
+  return text
+    .replace(/[\uE000-\uF8FF]/g, '') // Remove private use area symbols (like )
+    .replace(/[•●◦‣▪–—]/g, '•')     // Normalize various bullet symbols to a standard bullet
+    .replace(/[\u25A0-\u25FF]/g, '•') // Replace geometric shapes with bullet
+    .replace(/ {2,}/g, ' ')           // Collapse multiple spaces
+    .trim();
+}
+function isBulletLine(text) {
+  return /^([•\-\u25A0-\u25FF]|[\uE000-\uF8FF])/.test(text);
+}
+
 // Function to parse PDF and detect headers/footers and headings
 async function parsePDF(filePath) {
   try {
@@ -64,82 +84,16 @@ async function parsePDF(filePath) {
     const data = await pdfExtract.extract(filePath);
     console.log('PDF parsed successfully, pages:', data.pages.length);
 
-    // Collect first and last lines from each page for header/footer detection
-    const firstLines = [];
-    const lastLines = [];
-    const allPageBlocks = [];
-    const allLines = [];
-
-    // Gather all lines and font sizes for heading detection
-    data.pages.forEach(page => {
-      const lines = [];
-      let currentLine = [];
-      let lastY = null;
-      page.content.forEach(item => {
-        if (lastY !== null && Math.abs(item.y - lastY) > 2) {
-          if (currentLine.length) lines.push(currentLine);
-          currentLine = [];
-        }
-        currentLine.push(item);
-        lastY = item.y;
-      });
-      if (currentLine.length) lines.push(currentLine);
-      if (lines.length) {
-        firstLines.push(lines[0].map(i => i.str).join(' ').trim());
-        lastLines.push(lines[lines.length - 1].map(i => i.str).join(' ').trim());
-      }
-      allLines.push(...lines.map(line => line.map(i => i.str).join(' ').trim()));
-      allPageBlocks.push(lines);
-    });
-
-    // Detect repeated headers/footers
-    function findRepeatedLines(linesArr) {
-      const counts = {};
-      linesArr.forEach(line => {
-        if (line) counts[line] = (counts[line] || 0) + 1;
-      });
-      const threshold = Math.floor(data.pages.length * 0.7);
-      return Object.entries(counts)
-        .filter(([line, count]) => count >= threshold)
-        .map(([line]) => line);
-    }
-    const repeatedHeaders = findRepeatedLines(firstLines);
-    const repeatedFooters = findRepeatedLines(lastLines);
-
-    // Build structured blocks, skipping repeated headers/footers
-    const blocks = [];
-    allPageBlocks.forEach(lines => {
-      lines.forEach(line => {
-        const text = line.map(i => i.str).join(' ').trim();
-        if (!text) return;
-        if (repeatedHeaders.includes(text) || repeatedFooters.includes(text)) return;
-        // Heading detection: if most items in line have the max font size on the page, treat as heading
-        const fontSizes = line.map(i => i.height);
-        const maxFont = Math.max(...fontSizes);
-        const isHeading = fontSizes.filter(h => h === maxFont).length >= Math.floor(line.length * 0.7) && maxFont > 10;
-        if (isHeading) {
-          blocks.push({ type: 'heading_2', text });
-        } else {
-          blocks.push({ type: 'paragraph', text });
-        }
-      });
-    });
-
-    // Optionally, add header/footer once at top/bottom
-    if (repeatedHeaders.length) {
-      blocks.unshift({ type: 'paragraph', text: repeatedHeaders[0] });
-    }
-    if (repeatedFooters.length) {
-      blocks.push({ type: 'paragraph', text: repeatedFooters[0] });
-    }
+    // Extract raw text from all pages
+    const text = data.pages.map(page => page.content.map(item => item.str).join(' ')).join('\n\n');
+    console.log('Extracted text:', text.slice(0, 500)); // Log first 500 chars for debug
 
     return {
-      blocks,
+      text,
       metadata: {
         pageCount: data.pages.length,
         info: data.info || {},
-        repeatedHeaders,
-        repeatedFooters
+        title: data.info && data.info.Title ? data.info.Title : null
       }
     };
   } catch (error) {
@@ -160,6 +114,8 @@ app.post('/api/upload', upload.single('pdf'), async (req, res) => {
   try {
     // Parse the uploaded PDF
     const parsedData = await parsePDF(req.file.path);
+    console.log('Sending parsedContent:', parsedData);
+    console.log('parsedContent.text:', parsedData.text);
     console.log('PDF parsed successfully');
     
     // Send back both the file info and parsed content
@@ -192,6 +148,19 @@ app.post('/api/notion/create', express.json(), async (req, res) => {
           object: 'block',
           type: 'heading_2',
           heading_2: {
+            rich_text: [
+              {
+                type: 'text',
+                text: { content: block.text }
+              }
+            ]
+          }
+        };
+      } else if (block.type === 'bulleted_list_item') {
+        return {
+          object: 'block',
+          type: 'bulleted_list_item',
+          bulleted_list_item: {
             rich_text: [
               {
                 type: 'text',
@@ -243,6 +212,65 @@ app.post('/api/notion/create', express.json(), async (req, res) => {
 app.get('/api/test', (req, res) => {
   console.log('Test endpoint hit');
   res.json({ message: 'Server is running!' });
+});
+
+// Update the AI endpoint to use Gemini
+app.post('/api/ai/structure', express.json(), async (req, res) => {
+  try {
+    const { text } = req.body;
+    console.log('Received text for AI structuring:', text?.slice(0, 500)); // Log first 500 chars
+    
+    if (!text) {
+      console.log('No text received in request body');
+      return res.status(400).json({ error: 'Missing text' });
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      console.error('Gemini API key is not configured');
+      return res.status(500).json({ error: 'Gemini API key is not configured' });
+    }
+
+    const prompt = `
+You are an AI assistant that converts unstructured text into a JSON array of Notion blocks.
+
+• Detect headings: lines beginning with #, ##, ### → heading_1, heading_2, heading_3.  
+• Detect bullet lists: lines starting with -, *, or + → bulleted_list_item.  
+• Detect numbered lists: lines starting with 1., 2., etc. → numbered_list_item.  
+• Everything else → paragraph.  
+• Merge consecutive lines of the same type into one block.  
+• Preserve inline styling: **bold**, *italic*, \`code\`, [links](url).
+
+Always output **only** the JSON array—no markdown, no explanations.
+
+Text:
+${text}
+`;
+
+    console.log('Sending prompt to Gemini...');
+    const geminiResponse = await ai.models.generateContent({
+      model: 'gemini-1.5-pro-latest',
+      contents: prompt,
+    });
+    const responseContent = geminiResponse.candidates[0].content.parts[0].text;
+    console.log('Raw Gemini response:', responseContent?.slice(0, 500));
+    
+    let blocks;
+    try {
+      // Remove Markdown code block markers if present
+      const cleaned = responseContent.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+      blocks = Array.isArray(parsed) ? parsed : (parsed.blocks || []);
+    } catch (error) {
+      console.error('Failed to parse Gemini response as JSON:', error);
+      return res.status(500).json({ error: 'Failed to parse AI response', raw: responseContent });
+    }
+
+    console.log('Extracted blocks:', blocks.slice(0, 3)); // Log first 3 blocks
+    res.json({ blocks, raw: responseContent });
+  } catch (error) {
+    console.error('AI structuring error:', error);
+    res.status(500).json({ error: 'Failed to structure blocks', details: error.message });
+  }
 });
 
 // Error handling middleware
