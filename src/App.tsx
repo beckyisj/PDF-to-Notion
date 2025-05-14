@@ -1,12 +1,49 @@
 import { useState } from 'react'
 
+interface ParsedContent {
+  text: string;
+  metadata: {
+    pageCount: number;
+    info: any;
+  };
+  pages: string[];
+}
+
+interface UploadResponse {
+  message: string;
+  file: {
+    originalname: string;
+    size: number;
+  };
+  parsedContent: ParsedContent;
+  error?: string;
+}
+
 function App() {
   const [file, setFile] = useState<File | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [parsedContent, setParsedContent] = useState<ParsedContent | null>(null)
+
+  const testConnection = async () => {
+    try {
+      const response = await fetch('http://localhost:3000/api/test')
+      const data = await response.json()
+      setMessage(`Server connection successful: ${data.message}`)
+      setError(null)
+    } catch (err) {
+      setError('Cannot connect to server. Make sure it is running at http://localhost:3000')
+      setMessage(null)
+    }
+  }
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files[0]) {
       setFile(event.target.files[0])
+      setMessage(null)
+      setError(null)
+      setParsedContent(null)
     }
   }
 
@@ -14,8 +51,42 @@ function App() {
     if (!file) return
 
     setIsLoading(true)
-    // TODO: Implement file upload and conversion logic
-    setIsLoading(false)
+    setMessage(null)
+    setError(null)
+    setParsedContent(null)
+
+    try {
+      const formData = new FormData()
+      formData.append('pdf', file)
+
+      console.log('Attempting to upload file...')
+      const response = await fetch('http://localhost:3000/api/upload', {
+        method: 'POST',
+        body: formData,
+      }).catch(err => {
+        console.error('Network error:', err)
+        throw new Error(`Network error: ${err.message}. Make sure the server is running at http://localhost:3000`)
+      })
+
+      console.log('Response received:', response.status)
+      const data: UploadResponse = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data.error || `Server error: ${response.status}`)
+      }
+
+      setMessage('File uploaded and parsed successfully!')
+      setParsedContent(data.parsedContent)
+      setFile(null)
+      // Reset the file input
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+      if (fileInput) fileInput.value = ''
+    } catch (err) {
+      console.error('Upload error:', err)
+      setError(err instanceof Error ? err.message : 'An error occurred')
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -27,6 +98,13 @@ function App() {
               <div className="py-8 text-base leading-6 space-y-4 text-gray-700 sm:text-lg sm:leading-7">
                 <h1 className="text-2xl font-bold mb-8 text-center">PDF to Notion Converter</h1>
                 <div className="flex flex-col items-center space-y-4">
+                  <button
+                    onClick={testConnection}
+                    className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                  >
+                    Test Server Connection
+                  </button>
+                  
                   <input
                     type="file"
                     accept=".pdf"
@@ -48,6 +126,38 @@ function App() {
                   >
                     {isLoading ? 'Converting...' : 'Convert to Notion'}
                   </button>
+                  
+                  {message && (
+                    <div className="mt-4 p-4 bg-green-100 text-green-700 rounded-md">
+                      {message}
+                    </div>
+                  )}
+                  
+                  {error && (
+                    <div className="mt-4 p-4 bg-red-100 text-red-700 rounded-md">
+                      {error}
+                    </div>
+                  )}
+
+                  {parsedContent && (
+                    <div className="mt-8 w-full">
+                      <h2 className="text-xl font-semibold mb-4">Parsed PDF Content</h2>
+                      <div className="bg-gray-50 p-4 rounded-lg">
+                        <p className="mb-2"><strong>Pages:</strong> {parsedContent.metadata.pageCount}</p>
+                        <div className="mt-4">
+                          <h3 className="font-medium mb-2">Content Preview:</h3>
+                          <div className="max-h-60 overflow-y-auto bg-white p-4 rounded border">
+                            {parsedContent.pages.map((page, index) => (
+                              <div key={index} className="mb-4">
+                                <h4 className="font-medium">Page {index + 1}</h4>
+                                <p className="text-sm">{page}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
