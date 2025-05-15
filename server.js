@@ -8,7 +8,7 @@ import fsSync from 'fs';
 import { PDFExtract } from 'pdf.js-extract';
 import { Client as NotionClient } from '@notionhq/client';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -62,19 +62,6 @@ const upload = multer({ storage });
 
 // Serve static files from the 'public' directory
 app.use(express.static('public'));
-
-// Helper to clean text and detect bullets
-function cleanText(text) {
-  return text
-    .replace(/[\uE000-\uF8FF]/g, '') // Remove private use area symbols (like )
-    .replace(/[•●◦‣▪–—]/g, '•')     // Normalize various bullet symbols to a standard bullet
-    .replace(/[\u25A0-\u25FF]/g, '•') // Replace geometric shapes with bullet
-    .replace(/ {2,}/g, ' ')           // Collapse multiple spaces
-    .trim();
-}
-function isBulletLine(text) {
-  return /^([•\-\u25A0-\u25FF]|[\uE000-\uF8FF])/.test(text);
-}
 
 // Function to parse PDF and detect headers/footers and headings
 async function parsePDF(filePath) {
@@ -143,50 +130,70 @@ app.post('/api/notion/create', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'Missing title or blocks' });
     }
 
-    // Convert our block structure to Notion block format
-    const notionBlocks = blocks.map(block => {
-      if (block.type === 'heading_2') {
-        return {
-          object: 'block',
-          type: 'heading_2',
-          heading_2: {
-            rich_text: [
-              {
-                type: 'text',
-                text: { content: block.text }
-              }
-            ]
-          }
-        };
-      } else if (block.type === 'bulleted_list_item') {
-        return {
-          object: 'block',
-          type: 'bulleted_list_item',
-          bulleted_list_item: {
-            rich_text: [
-              {
-                type: 'text',
-                text: { content: block.text }
-              }
-            ]
-          }
-        };
-      } else {
-        // Default to paragraph
-        return {
+    // Convert plain text to Notion paragraph blocks (one per paragraph)
+    let notionBlocks = [];
+    if (typeof blocks === 'string') {
+      notionBlocks = blocks
+        .split('\n\n')
+        .filter(p => p.trim())
+        .map(paragraph => ({
           object: 'block',
           type: 'paragraph',
           paragraph: {
             rich_text: [
               {
                 type: 'text',
-                text: { content: block.text }
+                text: { content: paragraph.trim() }
               }
             ]
           }
-        };
-      }
-    });
+        }));
+    } else if (Array.isArray(blocks)) {
+      // fallback for legacy: treat as before
+      notionBlocks = blocks.map(block => {
+        if (block.type === 'heading_2') {
+          return {
+            object: 'block',
+            type: 'heading_2',
+            heading_2: {
+              rich_text: [
+                {
+                  type: 'text',
+                  text: { content: block.text }
+                }
+              ]
+            }
+          };
+        } else if (block.type === 'bulleted_list_item') {
+          return {
+            object: 'block',
+            type: 'bulleted_list_item',
+            bulleted_list_item: {
+              rich_text: [
+                {
+                  type: 'text',
+                  text: { content: block.text }
+                }
+              ]
+            }
+          };
+        } else {
+          // Default to paragraph
+          return {
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [
+                {
+                  type: 'text',
+                  text: { content: block.text }
+                }
+              ]
+            }
+          };
+        }
+      });
+    }
 
     // Create a new page in the Notion database
     const response = await notion.pages.create({
@@ -233,84 +240,80 @@ app.post('/api/ai/structure', express.json(), async (req, res) => {
     }
 
     const prompt = `
-You are an AI assistant that converts unstructured text into a JSON array of Notion blocks.
+Ignore all previous instructions and formatting.
+You are to output ONLY plain text, with each paragraph separated by a blank line.
+Do NOT use JSON, Markdown, or code blocks. Do NOT use {, }, [, ], or any symbols except normal text and newlines.
+Do NOT include any metadata, headers, or extra information.
 
-• Detect headings: lines beginning with #, ##, ### → heading_1, heading_2, heading_3.  
-• Detect bullet lists: lines starting with -, *, or + → bulleted_list_item.  
-• Detect numbered lists: lines starting with 1., 2., etc. → numbered_list_item.  
-• Everything else → paragraph.  
-• Merge consecutive lines of the same type into one block.  
-• Preserve inline styling: **bold**, *italic*, \`code\`, [links](url).
+Example of desired output:
+This is the first paragraph. It contains the main ideas and key points.
 
-Always output **only** the JSON array—no markdown, no explanations.
+This is the second paragraph. It continues with more information.
 
-Text:
+This is the third paragraph. Each paragraph should be separated by a blank line.
+
+Text to process:
 ${text}
 `;
 
     console.log('Sending prompt to Gemini...');
-    const geminiResponse = await ai.models.generateContent({
-      model: 'gemini-1.5-pro-latest',
+    const response = await ai.models.generateContent({
+      model: 'gemini-1.5-pro',
       contents: prompt,
-    });
-    const responseContent = geminiResponse.candidates[0].content.parts[0].text;
-    console.log('Raw Gemini response:', responseContent?.slice(0, 500));
-    
-    let blocks;
-    try {
-      // Remove Markdown code block markers (handles newlines)
-      const cleaned = responseContent.replace(/```[a-zA-Z]*\r?\n|```/g, '').trim();
-      console.log('About to write cleaned Gemini response to file...');
-      fsSync.writeFileSync('gemini_response.json', cleaned);
-      console.log('Full cleaned Gemini response written to gemini_response.json');
-      const parsed = JSON.parse(cleaned);
-      const geminiBlocks = Array.isArray(parsed) ? parsed : (parsed.blocks || []);
-      blocks = simplifyGeminiBlocks(geminiBlocks);
-    } catch (error) {
-      // Also write the cleaned response to file if parsing fails
-      try {
-        fsSync.writeFileSync('gemini_response.json', responseContent);
-        console.log('Wrote raw Gemini response to gemini_response.json after parse failure.');
-      } catch (e) {
-        console.error('Failed to write Gemini response to file:', e);
+      generationConfig: {
+        temperature: 0.1,  // Lower temperature for more consistent output
       }
-      console.error('Failed to parse Gemini response as JSON:', error);
-      return res.status(500).json({ error: 'Failed to parse AI response', raw: responseContent });
+    });
+    
+    // Get the raw text content from candidates
+    let responseContent = '';
+    if (response.candidates && response.candidates.length > 0) {
+      const candidate = response.candidates[0];
+      if (candidate.content && candidate.content.parts && candidate.content.parts.length > 0) {
+        responseContent = candidate.content.parts[0].text;
+      }
     }
-
-    console.log('Extracted blocks:', blocks.slice(0, 3)); // Log first 3 blocks
-    res.json({ blocks, raw: responseContent });
+    
+    console.log('Raw Gemini response content:', responseContent);
+    // Post-process: try to extract text from JSON if present
+    let plainText = responseContent;
+    try {
+      // Remove code block markers if present
+      let cleaned = responseContent;
+      if (cleaned.trim().startsWith('```')) {
+        cleaned = cleaned.split('\n').filter(line => !line.trim().startsWith('```')).join('\n');
+      }
+      // Try to parse as JSON
+      const parsed = JSON.parse(cleaned);
+      // If it's an array of blocks, extract all 'content' fields
+      if (Array.isArray(parsed)) {
+        plainText = parsed
+          .map(block => {
+            // Notion-style: block.paragraph.rich_text[0].text.content
+            if (block.paragraph && block.paragraph.rich_text && block.paragraph.rich_text[0] && block.paragraph.rich_text[0].text) {
+              return block.paragraph.rich_text[0].text.content;
+            }
+            // Heading-style: block.heading_1.rich_text[0].text.content
+            if (block.heading_1 && block.heading_1.rich_text && block.heading_1.rich_text[0] && block.heading_1.rich_text[0].text) {
+              return block.heading_1.rich_text[0].text.content;
+            }
+            // Fallback: block.text
+            if (block.text) return block.text;
+            return '';
+          })
+          .filter(Boolean)
+          .join('\n\n');
+      }
+    } catch (err) {
+      // If parsing fails, just use the raw responseContent
+      plainText = responseContent;
+    }
+    res.json({ text: plainText });
   } catch (error) {
     console.error('AI structuring error:', error);
     res.status(500).json({ error: 'Failed to structure blocks', details: error.message });
   }
 });
-
-// Helper to simplify Gemini Notion-style blocks to { type, text }
-function simplifyGeminiBlocks(blocks) {
-  return blocks.map(block => {
-    if (block.type === 'paragraph' && block.paragraph && block.paragraph.rich_text) {
-      return {
-        type: 'paragraph',
-        text: block.paragraph.rich_text.map(rt => rt.text?.content || '').join(' ')
-      };
-    }
-    if (block.type === 'heading_1' && block.heading_1 && block.heading_1.rich_text) {
-      return {
-        type: 'heading_2', // Map to your supported type
-        text: block.heading_1.rich_text.map(rt => rt.text?.content || '').join(' ')
-      };
-    }
-    if (block.type === 'bulleted_list_item' && block.bulleted_list_item && block.bulleted_list_item.rich_text) {
-      return {
-        type: 'bulleted_list_item',
-        text: block.bulleted_list_item.rich_text.map(rt => rt.text?.content || '').join(' ')
-      };
-    }
-    // Add more mappings as needed
-    return null;
-  }).filter(Boolean);
-}
 
 // Error handling middleware
 app.use((err, req, res, next) => {

@@ -23,14 +23,33 @@ interface UploadResponse {
   error?: string;
 }
 
-// Helper to clean text and format preview
-function cleanText(text: string) {
-  return text
-    .replace(/[\uE000-\uF8FF]/g, '') // Remove private use area symbols
-    .replace(/[•●◦‣▪–—]/g, '•')     // Normalize various bullet symbols
-    .replace(/[\u25A0-\u25FF]/g, '•')
-    .replace(/ {2,}/g, ' ')
-    .trim();
+// Helper to convert plain text to Notion blocks
+function textToNotionBlocks(text: string) {
+  // Split text into paragraphs
+  const paragraphs = text.split('\n\n').filter(p => p.trim());
+  
+  // Convert paragraphs to blocks
+  return paragraphs.map(paragraph => {
+    // Check if it looks like a heading (short, ends with no period)
+    if (paragraph.length < 100 && !paragraph.endsWith('.')) {
+      return {
+        type: 'heading_2' as const,
+        text: paragraph.trim()
+      };
+    }
+    // Check if it looks like a bullet point
+    else if (paragraph.trim().startsWith('•') || paragraph.trim().startsWith('-')) {
+      return {
+        type: 'bulleted_list_item' as const,
+        text: paragraph.trim().replace(/^[•-]\s*/, '')
+      };
+    }
+    // Default to paragraph
+    return {
+      type: 'paragraph' as const,
+      text: paragraph.trim()
+    };
+  });
 }
 
 function App() {
@@ -41,6 +60,10 @@ function App() {
   const [parsedContent, setParsedContent] = useState<ParsedContent | null>(null)
   const [notionStatus, setNotionStatus] = useState<string | null>(null)
   const [aiRaw, setAiRaw] = useState<string | null>(null)
+  const [processedBlocks, setProcessedBlocks] = useState<Array<{
+    type: 'heading_2' | 'paragraph' | 'bulleted_list_item';
+    text: string;
+  }> | null>(null)
 
   const testConnection = async () => {
     try {
@@ -70,6 +93,7 @@ function App() {
     setMessage(null)
     setError(null)
     setParsedContent(null)
+    setProcessedBlocks(null)
 
     try {
       const formData = new FormData()
@@ -106,8 +130,15 @@ function App() {
       if (!aiResponse.ok) {
         throw new Error(aiData.error || 'AI structuring failed')
       }
-      setParsedContent({ ...data.parsedContent, blocks: aiData.blocks })
-      setAiRaw(aiData.raw || JSON.stringify(aiData.blocks, null, 2))
+      
+      // Store the raw text response
+      setAiRaw(aiData.text)
+      
+      // Convert text to blocks
+      const blocks = textToNotionBlocks(aiData.text)
+      setProcessedBlocks(blocks)
+      
+      setParsedContent({ ...data.parsedContent })
       setFile(null)
       // Reset the file input
       const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
@@ -121,8 +152,8 @@ function App() {
   }
 
   const handleSendToNotion = async () => {
-    if (!parsedContent || !Array.isArray(parsedContent.blocks)) {
-      setNotionStatus('No parsed blocks to send to Notion.');
+    if (!parsedContent || !processedBlocks) {
+      setNotionStatus('No processed content to send to Notion.');
       setIsLoading(false);
       return;
     }
@@ -134,7 +165,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: parsedContent.metadata.title || file?.name || 'PDF to Notion Page',
-          blocks: parsedContent.blocks.slice(0, 100) // Notion API limit: 100 blocks per request
+          blocks: processedBlocks.slice(0, 100) // Notion API limit: 100 blocks per request
         })
       });
       const data = await response.json();
@@ -208,26 +239,10 @@ function App() {
                           <h3 className="font-medium mb-2">Content Preview:</h3>
                           {aiRaw && (
                             <div className="mb-4">
-                              <div className="text-xs text-gray-500 mb-1">Raw Gemini Response:</div>
-                              <pre className="max-h-40 overflow-y-auto bg-gray-200 p-2 rounded text-xs whitespace-pre-wrap break-words">{aiRaw}</pre>
+                              <div className="text-xs text-gray-500 mb-1">Gemini Response:</div>
+                              <pre className="max-h-60 overflow-y-auto bg-white p-4 rounded border text-sm whitespace-pre-wrap break-words">{aiRaw}</pre>
                             </div>
                           )}
-                          <div className="max-h-60 overflow-y-auto bg-white p-4 rounded border">
-                            {parsedContent.blocks?.map((block, index) => (
-                              <div key={index} className="mb-4">
-                                {block.type === 'heading_2' ? (
-                                  <h4 className="font-bold text-lg mb-2">{cleanText(block.text)}</h4>
-                                ) : block.type === 'bulleted_list_item' ? (
-                                  <div className="flex items-start pl-6">
-                                    <span className="mr-2 text-lg">•</span>
-                                    <span className="text-sm">{cleanText(block.text)}</span>
-                                  </div>
-                                ) : (
-                                  <p className="text-sm">{cleanText(block.text)}</p>
-                                )}
-                              </div>
-                            ))}
-                          </div>
                         </div>
                         <button
                           onClick={handleSendToNotion}
